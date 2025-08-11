@@ -50,6 +50,12 @@ let users = [
     { id: 3, name: "Bob Wilson", email: "bob@example.com", age: 35, role: "user" }
 ];
 
+let customers = [
+    { id: 1, name: "Alice Customer", email: "alice@customer.com", phone: "123-456-7890", company: "TechCorp", status: "active" },
+    { id: 2, name: "Bob Client", email: "bob@client.com", phone: "098-765-4321", company: "BusinessInc", status: "inactive" },
+    { id: 3, name: "Carol Buyer", email: "carol@buyer.com", phone: "555-123-4567", company: "ShopLLC", status: "active" }
+];
+
 let products = [
     { id: 1, name: "Laptop", price: 999.99, category: "Electronics", stock: 10 },
     { id: 2, name: "Book", price: 19.99, category: "Education", stock: 50 },
@@ -98,97 +104,254 @@ app.post('/api/auth/login', (req, res) => {
 
 // Bug: No logout endpoint (tokens remain valid until expiry)
 
-// SIMPLE BUGS (Enhanced with auth issues)
+// USERS ENDPOINTS (NO AUTH REQUIRED - BUT WITH BUGS)
 
-// Bug 1: Inconsistent HTTP status codes + Auth bypass
-app.get('/api/users', maybeAuthenticateToken, (req, res) => {
+// Bug 1: GET Users without auth + Wrong status code
+app.get('/api/users', (req, res) => {
     // Bug: Should return 200, but returns 201 (Created) instead
-    // Bug: Uses weak auth that can be bypassed
+    // Bug: No auth required (as requested) but exposes too much info
     res.status(201).json({ 
-        users, 
+        users: users.map(u => ({
+            ...u,
+            // Bug: Exposing sensitive info even without auth
+            internalId: 'internal_' + u.id,
+            lastLogin: new Date().toISOString(),
+            systemRole: u.role === 'admin' ? 'SUPER_ADMIN' : 'BASIC_USER'
+        })), 
         total: users.length,
-        // Bug: Exposing whether user is authenticated
-        authenticated: !!req.user
+        // Bug: Exposing system info
+        serverTime: new Date().toISOString(),
+        databaseInfo: 'users_table_v1.2'
     });
 });
 
-// Bug 2: Missing input validation + Empty handling
-app.post('/api/users', authenticateToken, (req, res) => {
-    const { name, email, age, role } = req.body;
+// Bug 2: POST User without auth + Missing validation + Empty handling
+app.post('/api/users', (req, res) => {
+    const { name, email, age, role } = req.body || {};
     
+    // Bug: No auth required allows anyone to create admin users
     // Bug: Handles empty body but creates invalid users
     const newUser = {
-        id: users.length + 1,
-        name: name || 'Unknown User', // Bug: Accepts empty/undefined
-        email: email || 'no-email@example.com', // Bug: Creates invalid email
-        age: age || 0, // Bug: Age can be 0 or negative
-        role: role || 'user'
+        id: users.length + 1, // Bug: Race condition possible
+        name: name || 'Anonymous User', // Bug: Accepts empty/undefined
+        email: email || `user${Date.now()}@temp.com`, // Bug: Creates temp emails
+        age: parseInt(age) || 18, // Bug: Default age, NaN becomes 18
+        role: role || 'user' // Bug: No validation - can create admin users!
     };
     
     // Bug: No validation for email format, age limits, role validity
+    // Bug: Allows duplicate emails
+    const existingUser = users.find(u => u.email === newUser.email);
+    if (existingUser && email) {
+        // Bug: Inconsistent error handling
+        return res.status(400).send('Email already exists'); // Plain text instead of JSON
+    }
+    
     users.push(newUser);
     
     // Bug: Returns sensitive user info including internal fields
     res.status(201).json({
         user: newUser,
-        createdBy: req.user.username,
-        internalToken: req.user.internalId
+        message: 'User created successfully',
+        // Bug: Exposing creation details
+        createdAt: new Date().toISOString(),
+        createdBy: 'public_api',
+        isAdminUser: newUser.role === 'admin'
     });
 });
 
-// Bug 3: Inconsistent response format + Search issues
-app.get('/api/users/:id', maybeAuthenticateToken, (req, res) => {
-    const userId = parseInt(req.params.id);
+// CUSTOMER ENDPOINTS (ALL REQUIRE JWT AUTH + BUGS)
+
+// Bug 3: Get all customers + Auth issues
+app.get('/api/customers', authenticateToken, (req, res) => {
+    // Bug: Different response format than users endpoint
+    res.json({
+        data: customers, // Bug: Different key name (data vs customers)
+        count: customers.length, // Bug: Different key name (count vs total)
+        // Bug: Exposing user info who made request
+        requestedBy: req.user.username,
+        userRole: req.user.role,
+        accessToken: req.user.internalId
+    });
+});
+
+// Bug 4: Create customer + Empty handling + Validation issues
+app.post('/api/customers', authenticateToken, (req, res) => {
+    const { name, email, phone, company, status } = req.body || {};
+    
+    // Bug: Handles empty body but creates invalid customers
+    const newCustomer = {
+        id: customers.length + 1, // Bug: Race condition in ID generation
+        name: name || 'Unnamed Customer', // Bug: Accepts empty name
+        email: email || 'no-email@example.com', // Bug: Creates invalid email
+        phone: phone || '000-000-0000', // Bug: Fake phone number
+        company: company || 'Unknown Company',
+        status: status || 'pending' // Bug: No validation of status values
+    };
+    
+    // Bug: No validation for email format, phone format, status enum
+    // Bug: No duplicate checking
+    customers.push(newCustomer);
+    
+    res.status(201).json({
+        customer: newCustomer,
+        createdBy: req.user.username,
+        // Bug: Exposing internal token info
+        authToken: req.headers.authorization
+    });
+});
+
+// Bug 5: Get customer by ID + Inconsistent response + Exception issues
+app.get('/api/customers/:id', authenticateToken, (req, res) => {
+    const customerId = parseInt(req.params.id);
     
     // Bug: String to number conversion issues
     if (req.params.id === 'undefined' || req.params.id === 'null') {
         // Bug: Unhandled exception for invalid IDs
-        throw new Error('Invalid user ID provided');
+        throw new Error('Invalid customer ID provided: ' + req.params.id);
     }
     
-    const user = users.find(u => u.id === userId);
+    const customer = customers.find(c => c.id === customerId);
     
-    if (!user) {
+    if (!customer) {
         // Bug: Different error format than other endpoints
-        return res.status(404).send("User not found");
+        return res.status(404).send("Customer not found"); // Plain text error
     }
     
-    // Bug: Returns user directly instead of wrapped in object like other endpoints
-    res.json(user);
+    // Bug: Returns customer directly instead of wrapped object
+    // Bug: Inconsistent with other endpoints structure
+    res.json(customer);
 });
 
-// MEDIUM BUGS (Enhanced with auth and search issues)
-
-// Bug 4: Race condition and incorrect ID generation + Auth issues
-app.post('/api/products', maybeAuthenticateToken, (req, res) => {
-    const { name, price, category, stock } = req.body || {}; // Bug: Handles empty body
+// Bug 6: Update customer + Auth issues + Exception handling
+app.put('/api/customers/:id', authenticateToken, (req, res) => {
+    const customerId = parseInt(req.params.id);
+    const customerIndex = customers.findIndex(c => c.id === customerId);
     
-    // Bug: Using array length for ID can cause duplicates in concurrent requests
-    const newProduct = {
-        id: products.length + 1, // Should use proper ID generation
-        name: name || 'Unnamed Product', // Bug: Accepts empty name
-        price: parseFloat(price) || 0, // Bug: Price can be 0, NaN becomes 0
-        category: category || 'Uncategorized',
-        stock: parseInt(stock) || 0 // Bug: Stock can be 0 or negative
-    };
+    // Bug: Handles empty body but continues processing
+    const updateData = req.body || {};
     
-    // Bug: No validation for negative prices or stock
-    products.push(newProduct);
-    
-    // Bug: Different response based on authentication
-    if (req.user) {
-        res.status(201).json({ 
-            product: newProduct, 
-            createdBy: req.user.username,
-            adminAccess: req.user.role === 'admin'
+    if (customerIndex === -1) {
+        // Bug: Exposing internal system information
+        return res.status(404).json({ 
+            error: "Customer not found",
+            debug: {
+                searchedId: customerId,
+                availableIds: customers.map(c => c.id),
+                serverTime: new Date().toISOString(),
+                // Bug: Exposing JWT info in error
+                requestUser: req.user.username,
+                userToken: req.user.internalId,
+                originalRequest: req.originalUrl
+            }
         });
-    } else {
-        res.status(201).json({ product: newProduct });
+    }
+    
+    const { name, email, phone, company, status } = updateData;
+    
+    try {
+        // Bug: Partial update without proper validation
+        if (name !== undefined) customers[customerIndex].name = name; // Bug: Can set empty name
+        if (email !== undefined) customers[customerIndex].email = email; // Bug: No email validation
+        if (phone !== undefined) customers[customerIndex].phone = phone; // Bug: No phone validation
+        if (company !== undefined) customers[customerIndex].company = company;
+        if (status !== undefined) customers[customerIndex].status = status; // Bug: No status validation
+        
+        // Bug: Unhandled exception for certain edge cases
+        if (updateData.invalidField) {
+            // Bug: Throws instead of handling gracefully
+            throw new Error('Invalid field provided in customer update');
+        }
+        
+        res.json({ 
+            customer: customers[customerIndex],
+            updatedBy: req.user.username,
+            updatedFields: Object.keys(updateData),
+            updateTime: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        // Bug: Unhandled exception bubbles up
+        throw new Error(`Customer update failed: ${error.message}`);
     }
 });
 
-// Bug 5: Pagination logic error + Inexact search
-app.get('/api/products', (req, res) => {
+// Bug 7: Delete customer + Auth bypass possibilities
+app.delete('/api/customers/:id', authenticateToken, (req, res) => {
+    const customerId = parseInt(req.params.id);
+    const customerIndex = customers.findIndex(c => c.id === customerId);
+    
+    // Bug: No role checking - any authenticated user can delete customers
+    if (customerIndex === -1) {
+        return res.status(404).json({ error: "Customer not found" });
+    }
+    
+    const deletedCustomer = customers[customerIndex];
+    customers.splice(customerIndex, 1);
+    
+    res.json({ 
+        message: "Customer deleted successfully", 
+        customer: deletedCustomer,
+        deletedBy: req.user.username,
+        // Bug: Exposing sensitive deletion info
+        deletionTime: new Date().toISOString(),
+        remainingCustomers: customers.length,
+        userRole: req.user.role
+    });
+});
+
+// CUSTOMER SEARCH (REQUIRES AUTH + BUGS)
+
+// Bug 8: Customer search + Inexact matching + Auth issues
+app.get('/api/customers/search', authenticateToken, (req, res) => {
+    const query = req.query.q;
+    
+    // Bug: Handles empty query but with inconsistent behavior
+    if (!query || query.trim() === '') {
+        // Bug: Empty search returns different structure than normal search
+        return res.json({ customers: [], message: 'Empty search query' });
+    }
+    
+    try {
+        let results = [];
+        
+        if (query.includes("'") || query.includes(";") || query.includes("--")) {
+            // Bug: Simulating injection attack - returns all data
+            results = customers;
+        } else {
+            // Bug: Inexact search with multiple issues
+            results = customers.filter(c => {
+                // Bug: Case sensitive and partial matching issues
+                const nameMatch = c.name && c.name.toLowerCase().includes(query.toLowerCase());
+                const emailMatch = c.email && c.email.indexOf(query) >= 0; // Bug: Case sensitive email search
+                const companyMatch = c.company && c.company.startsWith(query); // Bug: Only prefix matching
+                
+                return nameMatch || emailMatch || companyMatch;
+            });
+        }
+        
+        // Bug: Inconsistent result structure
+        res.json({ 
+            customers: results, // Bug: Different key than other endpoints
+            query,
+            searchType: 'customer_search',
+            // Bug: Exposing user info who searched
+            searchedBy: req.user.username,
+            userRole: req.user.role,
+            // Bug: Exposing search algorithm details
+            algorithm: 'mixed_customer_matching'
+        });
+        
+    } catch (error) {
+        // Bug: Unhandled exception thrown instead of proper error response
+        throw new Error(`Customer search failed: ${error.message} - Query was: ${query}`);
+    }
+});
+
+// OTHER ENDPOINTS (REQUIRE AUTH)
+
+// Bug 9: Products now require auth + Race condition + Empty handling
+app.get('/api/products', authenticateToken, (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const search = req.query.search;
@@ -217,37 +380,33 @@ app.get('/api/products', (req, res) => {
         total: filteredProducts.length,
         // Bug: Incorrect total pages calculation
         totalPages: Math.floor(filteredProducts.length / limit), // Should use Math.ceil
-        // Bug: Exposing internal search logic
-        searchMethod: 'indexOf',
-        appliedFilters: { search }
+        // Bug: Exposing user who accessed products
+        accessedBy: req.user.username,
+        userRole: req.user.role
     });
 });
 
-// Bug 6: Authentication bypass + Role confusion
-app.delete('/api/users/:id', maybeAuthenticateToken, (req, res) => {
-    const userId = parseInt(req.params.id);
-    const userIndex = users.findIndex(u => u.id === userId);
+app.post('/api/products', authenticateToken, (req, res) => {
+    const { name, price, category, stock } = req.body || {}; // Bug: Handles empty body
     
-    // Bug: Weak authentication check
-    if (!req.user || !req.user.username) {
-        // Bug: Still allows deletion with partial auth
-        console.log('Warning: Unauthenticated deletion attempt');
-    }
+    // Bug: Using array length for ID can cause duplicates in concurrent requests
+    const newProduct = {
+        id: products.length + 1, // Should use proper ID generation
+        name: name || 'Unnamed Product', // Bug: Accepts empty name
+        price: parseFloat(price) || 0, // Bug: Price can be 0, NaN becomes 0
+        category: category || 'Uncategorized',
+        stock: parseInt(stock) || 0 // Bug: Stock can be 0 or negative
+    };
     
-    if (userIndex === -1) {
-        return res.status(404).json({ error: "User not found" });
-    }
+    // Bug: No validation for negative prices or stock
+    products.push(newProduct);
     
-    const deletedUser = users[userIndex];
-    
-    // Bug: Admin users can delete themselves
-    // Bug: Users can delete other users if they have any token
-    users.splice(userIndex, 1);
-    
-    res.json({ 
-        message: "User deleted successfully", 
-        user: deletedUser,
-        deletedBy: req.user ? req.user.username : 'unknown'
+    res.status(201).json({ 
+        product: newProduct, 
+        createdBy: req.user.username,
+        // Bug: Exposing admin access info
+        adminAccess: req.user.role === 'admin',
+        creationTime: new Date().toISOString()
     });
 });
 
@@ -430,27 +589,34 @@ app.use('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`Buggy Test API with JWT Auth running on port ${PORT}`);
-    console.log(`\n=== AUTH ENDPOINTS ===`);
+    console.log(`🔥 Buggy Customer API with JWT Auth running on port ${PORT}`);
+    console.log(`\n=== 🔐 AUTH ENDPOINTS ===`);
     console.log(`POST   /api/auth/login`);
-    console.log(`\n=== TEST ENDPOINTS ===`);
-    console.log(`GET    /api/users (weak auth)`);
-    console.log(`POST   /api/users (requires auth)`);
-    console.log(`GET    /api/users/:id (weak auth)`);
-    console.log(`PUT    /api/users/:id (requires auth)`);
-    console.log(`DELETE /api/users/:id (weak auth)`);
-    console.log(`GET    /api/products (no auth)`);
-    console.log(`POST   /api/products (weak auth)`);
-    console.log(`GET    /api/search?q=term (weak auth)`);
-    console.log(`GET    /api/analytics?days=30 (requires auth)`);
-    console.log(`GET    /api/admin/sensitive-data (no auth - BUG!)`);
+    console.log(`\n=== 👥 USER ENDPOINTS (NO AUTH REQUIRED) ===`);
+    console.log(`GET    /api/users (🐛 no auth + bugs)`);
+    console.log(`POST   /api/users (🐛 no auth + bugs)`);
+    console.log(`\n=== 👤 CUSTOMER ENDPOINTS (AUTH REQUIRED) ===`);
+    console.log(`GET    /api/customers (🔒 auth required)`);
+    console.log(`POST   /api/customers (🔒 auth required)`);
+    console.log(`GET    /api/customers/:id (🔒 auth required)`);
+    console.log(`PUT    /api/customers/:id (🔒 auth required)`);
+    console.log(`DELETE /api/customers/:id (🔒 auth required)`);
+    console.log(`GET    /api/customers/search?q=term (🔒 auth required)`);
+    console.log(`\n=== 📦 PRODUCT ENDPOINTS (AUTH REQUIRED) ===`);
+    console.log(`GET    /api/products (🔒 auth required)`);
+    console.log(`POST   /api/products (🔒 auth required)`);
+    console.log(`\n=== 🔍 OTHER ENDPOINTS (AUTH REQUIRED) ===`);
+    console.log(`GET    /api/search?q=term (🔒 auth required)`);
+    console.log(`GET    /api/analytics?days=30 (🔒 auth required)`);
+    console.log(`GET    /api/admin/sensitive-data (🐛 no auth - BUG!)`);
     console.log(`GET    /api/limited-endpoint (no auth)`);
-    console.log(`\n=== TEST CREDENTIALS ===`);
+    console.log(`\n=== 🔑 TEST CREDENTIALS ===`);
     console.log(`Admin: username=admin, password=admin123`);
     console.log(`User:  username=user, password=user123`);
     console.log(`Test:  username=test, password=test`);
     console.log(`Empty: username="", password=empty`);
     console.log(`\n⚠️  WARNING: This API contains dangerous bugs for testing!`);
+    console.log(`🎯 Focus: Customer management with auth requirements`);
 });
 
 module.exports = app;
